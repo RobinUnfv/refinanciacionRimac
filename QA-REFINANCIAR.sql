@@ -8,10 +8,10 @@ DECLARE
   -- ==================================================================================================
 
   -- Regla de cambio de plan
-  kPlanSolJur     CONSTANT VARCHAR2(6) := 'CON020';
-  kPlanSolNat     CONSTANT VARCHAR2(6) := 'CUP133';
-  kPlanUsdJur     CONSTANT VARCHAR2(6) := 'CON002';
-  kPlanUsdNat     CONSTANT VARCHAR2(6) := 'CUP119';
+  --kPlanSolJur     CONSTANT VARCHAR2(6) := 'CON020';
+  kPlanSolNat     CONSTANT VARCHAR2(6) := 'CUP254';
+  --kPlanUsdJur     CONSTANT VARCHAR2(6) := 'CON002';
+  kPlanUsdNat     CONSTANT VARCHAR2(6) := 'CUP201';
   -- Motivo de refinanciamiento (LOV_MOTREFIN de FIN00012: "A SOLICITUD" / "INTERNO PARA COMPENSAR")
   kMotivoDesc     CONSTANT VARCHAR2(30) := 'A SOLICITUD';
   kSi             CONSTANT VARCHAR2(1)  := 'S';
@@ -1233,25 +1233,32 @@ DECLARE
   -- 09. Cambio de plan en :B01_1.CodPlanFracc  (regla de negocio: moneda + persona juridica/natural)
   -- ================================================================================================
   PROCEDURE F12_CAMBIAR_PLAN IS
-    cPersona  VARCHAR2(10);
+    --cPersona  VARCHAR2(10);
     cPlan     ACSELX.PLAN_FINANCIAMIENTO.CodPlan%TYPE;
     cNomPlan  ACSELX.PLAN_FINANCIAMIENTO.NomPlan%TYPE;
   BEGIN
     INICIO_PASO('09.CAMBIO PLAN','FIN00012 | B01_1.CODPLANFRACC | PRE-TEXT-ITEM / WHEN-VALIDATE-ITEM / POST-TEXT-ITEM');
     P_LOG('gCliAseg.TipoCli '||gCliAseg.TipoCli||' ,  gC00_12.cCodMonedaAnt '||gC00_12.cCodMonedaAnt);
     -- Regla de negocio
-    IF gCliAseg.TipoCli IN('E','G') THEN
-      cPersona := 'JURIDICA';
-    ELSE 
-      cPersona := 'NATURAL';
-    END IF;
-    cPlan := CASE gC00_12.cCodMonedaAnt
-               WHEN 'SOL' THEN CASE cPersona WHEN 'JURIDICA' THEN kPlanSolJur ELSE kPlanSolNat END
-               WHEN 'USD' THEN CASE cPersona WHEN 'JURIDICA' THEN kPlanUsdJur ELSE kPlanUsdNat END
-             END;
+    
+    IF gCliAseg.TipoCli IN('P') THEN
+
+       IF gC00_12.cCodMonedaAnt = 'SOL' THEN
+           cPlan := kPlanSolNat;
+       END IF;
+       
+       IF gC00_12.cCodMonedaAnt = 'DOL' THEN
+           cPlan := kPlanUsdNat;
+       END IF;
+       
+    ELSE
+       P_ERROR('El cliente  '||gB01_1.CodCli||'/'||gCliAseg.TipoCli||' '|| 'no tiene configurado el plan.');
+    END IF
+    
     IF cPlan IS NULL THEN
       P_ERROR('No hay regla de plan para la moneda '||gC00_12.cCodMonedaAnt||' (solo SOL y USD)');
     END IF;
+    
     P_LOG('Regla: moneda '||gC00_12.cCodMonedaAnt||' + persona '||cPersona||' (TipoCli '||gCliAseg.TipoCli||
           ') => plan '||cPlan);
 
