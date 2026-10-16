@@ -1,8 +1,8 @@
 DECLARE
   -- ===================================== PARAMETROS DE ENTRADA =====================================
-  p_nNumFact ACSELX.FACTURA.NumFact%TYPE      := 1166552392;   -- <<< documento a refinanciar
-  p_nIdepol  ACSELX.CERTIFICADO.IdePol%TYPE   := 1629307181;   -- <<< poliza del certificado
-  p_nNumCert ACSELX.CERTIFICADO.NumCert%TYPE  := 1; -- <<< certificado
+  p_nNumFact ACSELX.FACTURA.NumFact%TYPE      := 1124879657;   -- <<< documento a refinanciar
+  p_nIdepol  ACSELX.CERTIFICADO.IdePol%TYPE   := 14928478;   -- <<< poliza del certificado
+  p_nNumCert ACSELX.CERTIFICADO.NumCert%TYPE  := 17; -- <<< certificado
   p_cMotRefi ACSELX.LVAL.CODLVAL%TYPE := 'SOL';
   p_cObservacion  VARCHAR2(250) := 'Cambio de responsable de pago al asegurado';
   -- ==================================================================================================
@@ -12,6 +12,7 @@ DECLARE
   kPlanSolNat     CONSTANT VARCHAR2(6) := 'CUP254';
   --kPlanUsdJur     CONSTANT VARCHAR2(6) := 'CON002';
   kPlanUsdNat     CONSTANT VARCHAR2(6) := 'CUP201';
+
   -- Motivo de refinanciamiento (LOV_MOTREFIN de FIN00012: "A SOLICITUD" / "INTERNO PARA COMPENSAR")
   kMotivoDesc     CONSTANT VARCHAR2(30) := 'A SOLICITUD';
   kSi             CONSTANT VARCHAR2(1)  := 'S';
@@ -438,12 +439,7 @@ DECLARE
     END IF;
 
     IF gB03_1.COUNT = 0 THEN
-      FOR d IN (SELECT DISTINCT CF.NumFinanc, CF.StsFin, CF.NumRefracc, CF.IdePol, CF.NumCert
-                FROM   ACSELX.COND_FINANCIAMIENTO CF, ACSELX.GIROS_FINANCIAMIENTO G, ACSELX.ACREENCIA A
-                WHERE  A.IdeFact = gB02_1.IdeFact AND G.NumAcre = A.NumAcre AND CF.NumFinanc = G.NumFinanc) LOOP
-        P_AVISO('Financ '||d.NumFinanc||' poliza '||d.IdePol||' cert '||d.NumCert||' StsFin='||d.StsFin||
-                ' NumRefracc='||NVL(TO_CHAR(d.NumRefracc),'-'));
-      END LOOP;
+      
       P_ERROR('La consulta de FIN00010 no devuelve financiamientos para el documento (deben estar StsFin=FRA, '||
               'sin NumRefracc y con facturas): puede estar anulado, cobrado o ya refinanciado');
     END IF;
@@ -847,7 +843,7 @@ DECLARE
   PROCEDURE F10_SELECCIONAR_CERTIFICADO IS
     nMarc PLS_INTEGER := 0;
   BEGIN
-    INICIO_PASO('05.CHECK SEL','FIN00010 | B03_1.CSELECCION | WHEN-CHECKBOX-CHANGED | P60');
+    INICIO_PASO('05.CHECK SEL','FIN00010 | B03_1.CSELECCION | WHEN-CHECKBOX-CHANGED');
     FOR i IN 1 .. gB03_1.COUNT LOOP
       IF gB03_1(i).IdePol = p_nIdepol AND (gB03_1(i).NumCert = p_nNumCert OR gB03_1(i).NumCert IS NULL)
          AND NVL(gB03_1(i).cSeleccion,'N') = kNo THEN
@@ -1085,7 +1081,7 @@ DECLARE
     nCant NUMBER;
   BEGIN
 
-    INICIO_PASO('07.FIN00012 INICIO','FIN00012 | FORMA | WHEN-NEW-FORM-INSTANCE | P6 + B01_1 PRE-BLOCK P12');
+    INICIO_PASO('07.FIN00012 INICIO','FIN00012 | FORMA | WHEN-NEW-FORM-INSTANCE | B01_1 PRE-BLOCK');
     gC00_12.cIndAutoriza := kNo;
     gC00_12.cIndCrear    := kSi;
     
@@ -1228,6 +1224,28 @@ DECLARE
              ' (TipoCli '||C.TipoCli||') FormCobro '||gB01_1.CodFormCobro||' Ruta '||gB01_1.CodRuta||
              ' DocPago '||NVL(TO_CHAR(gB01_1.NumDoc),'-'));
   END F12_CAMBIAR_RESPONSABLE;
+  
+  -- ==============================================================================================
+  -- Cantidad de documentos que se anularan en el refinanciamiento (regla de cuotas de CUP254 / CUP201)
+  -- ================================================================================================
+  FUNCTION F12_CANT_DOCS_ANULAR RETURN NUMBER IS
+    nCantDocs NUMBER;
+  BEGIN
+    SELECT COUNT(DISTINCT F.IdeFact)
+    INTO   nCantDocs
+    FROM   ACSELX.COND_FINANCIAMIENTO CF,
+           ACSELX.GIROS_FINANCIAMIENTO G,
+           ACSELX.ACREENCIA A,
+           ACSELX.FACTURA F
+    WHERE  CF.NumRefracc = gC00_12.nNumRefinanc
+    AND    G.NumFinanc   = CF.NumFinanc
+    AND    G.StsGiro     = 'ACT'
+    AND    A.NumAcre     = G.NumAcre
+    AND    F.IdeFact     = A.IdeFact
+    AND    F.StsFact     = 'INC';
+
+    RETURN NVL(nCantDocs,0);
+  END F12_CANT_DOCS_ANULAR;
 
   -- ================================================================================================
   -- 09. Cambio de plan en :B01_1.CodPlanFracc  (regla de negocio: moneda + persona juridica/natural)
@@ -1236,6 +1254,9 @@ DECLARE
     --cPersona  VARCHAR2(10);
     cPlan     ACSELX.PLAN_FINANCIAMIENTO.CodPlan%TYPE;
     cNomPlan  ACSELX.PLAN_FINANCIAMIENTO.NomPlan%TYPE;
+    --
+    nNroGirosPlan ACSELX.PLAN_FINANCIAMIENTO.NroGiros%TYPE;
+    nCantDocs NUMBER;
   BEGIN
     INICIO_PASO('09.CAMBIO PLAN','FIN00012 | B01_1.CODPLANFRACC | PRE-TEXT-ITEM / WHEN-VALIDATE-ITEM / POST-TEXT-ITEM');
     P_LOG('gCliAseg.TipoCli '||gCliAseg.TipoCli||' ,  gC00_12.cCodMonedaAnt '||gC00_12.cCodMonedaAnt);
@@ -1247,19 +1268,19 @@ DECLARE
            cPlan := kPlanSolNat;
        END IF;
        
-       IF gC00_12.cCodMonedaAnt = 'DOL' THEN
+       IF gC00_12.cCodMonedaAnt = 'USD' THEN
            cPlan := kPlanUsdNat;
        END IF;
        
     ELSE
-       P_ERROR('El cliente  '||gB01_1.CodCli||'/'||gCliAseg.TipoCli||' '|| 'no tiene configurado el plan.');
-    END IF
+       P_ERROR('El cliente '||gB01_1.CodCli||' es juridica('||gCliAseg.TipoCli||') y los planes (CUP254 y CUP201) son para natural.');
+    END IF;
     
     IF cPlan IS NULL THEN
       P_ERROR('No hay regla de plan para la moneda '||gC00_12.cCodMonedaAnt||' (solo SOL y USD)');
     END IF;
     
-    P_LOG('Regla: moneda '||gC00_12.cCodMonedaAnt||' + persona '||cPersona||' (TipoCli '||gCliAseg.TipoCli||
+    P_LOG('Regla: moneda '||gC00_12.cCodMonedaAnt||' + persona NATURAL (TipoCli '||gCliAseg.TipoCli||
           ') => plan '||cPlan);
 
     -- PRE-TEXT-ITEM
@@ -1269,18 +1290,31 @@ DECLARE
     -- WHEN-VALIDATE-ITEM
     BEGIN
       SELECT ModPlan, NomPlan, TipoFin, NroGiros
-      INTO   gB01_1.NumModPlanFracc, cNomPlan, gB01_1TipFin, gB01_1.CantCuo
+      INTO   gB01_1.NumModPlanFracc, cNomPlan, gB01_1TipFin,nNroGirosPlan --gB01_1.CantCuo
       FROM   ACSELX.PLAN_FINANCIAMIENTO
-      WHERE  CodPlan = gB01_1.CodPlanFracc;/*
-      AND  StsPlan = 'ACT'
-      AND  ModPlan = (SELECT MAX(P2.ModPlan) 
-                    FROM ACSELX.PLAN_FINANCIAMIENTO P2
-                        WHERE P2.CodPlan = gB01_1.CodPlanFracc 
-            AND P2.StsPlan = 'ACT');*/
+      WHERE  CodPlan = gB01_1.CodPlanFracc;
     EXCEPTION
       WHEN OTHERS THEN 
        P_ERROR('No existe el plan de financiamiento ACT '||gB01_1.CodPlanFracc||' (LOV)');
     END;
+    
+    gB01_1.CantCuo := nNroGirosPlan; -- :B01_1.CantCuo := NroGiros del plan (WHEN-VALIDATE-ITEM)
+    nCantDocs := F12_CANT_DOCS_ANULAR;
+    
+    IF nCantDocs = 0 THEN
+      P_ERROR('No hay documentos pendientes (FACTURA.StsFact = INC) por anular para el refinanciamiento '||
+      gC00_12.nNumRefinanc);
+    END IF;
+    
+    -- Si CantCuo supera el NroGiros del plan, FR_Fraccionar crea la politica 007 y en Aceptar se pide autorizacion
+    IF nCantDocs > NVL(nNroGirosPlan,0) THEN
+        P_ERROR('Se requieren '||nCantDocs||' cuotas y el plan '||gB01_1.CodPlanFracc||' permite como maximo '||
+        nNroGirosPlan||' (politica 007: requiere autorizacion)');
+    END IF;
+    
+    P_LOG(':B01_1.CantCuo '||nNroGirosPlan||' (NroGiros del plan) -> '||nCantDocs||' (documentos a anular)');
+    gB01_1.CantCuo := nCantDocs;
+    
     IF gB01_1TipFin = 'CCA' THEN
       gB01_1.TipoModCob := 'CCA';
     ELSIF gB01_1TipFin IN ('CON','LET') THEN
@@ -1317,7 +1351,7 @@ DECLARE
   -- ================================================================================================
   PROCEDURE F12_GRABAR_B01_1 IS
   BEGIN
-    P_LOG('FR_Commit_Form de B01_1 (PRE-UPDATE P17 + UPDATE ACSELX.RESP_PAGO_REFRA)');
+    P_LOG('FR_Commit_Form de B01_1 (PRE-UPDATE + UPDATE ACSELX.RESP_PAGO_REFRA)');
     gB01_1.DiaCobro := 1;
     gB01_1.FormFact := 'PRP';
     IF gB01_1.CodFormCobro IN ('DBA','TCR') THEN
@@ -1470,13 +1504,13 @@ DECLARE
   END F12_CONSULTAR_B03_1;
 
   -- ================================================================================================
-  -- 10. [FIN00012 | B01_1 | KEY-NXTBLK | P21]  pasar al bloque siguiente = generar la propuesta
+  -- 10. [FIN00012 | B01_1 | KEY-NXTBLK]  pasar al bloque siguiente = generar la propuesta
   -- ================================================================================================
   PROCEDURE F12_SIGUIENTE_BLOQUE IS
     nPorcPago  ACSELX.RESP_PAGO.PorcPago%TYPE;
     cExiste    VARCHAR2(1);
   BEGIN
-    INICIO_PASO('10.KEY-NXTBLK B01_1','FIN00012 | B01_1 | KEY-NXTBLK | P21');
+    INICIO_PASO('10.KEY-NXTBLK B01_1','FIN00012 | B01_1 | KEY-NXTBLK');
     -- N3036890
     IF gB01_1.TipoModCob IN ('DPP','CCA') THEN
       IF gB01_1.TipoModCob = 'DPP' THEN
@@ -1654,7 +1688,7 @@ DECLARE
   END F12_FR_VERIFICAR_POLITICAS_VIO;
 
   -- ================================================================================================
-  -- 11. [FIN00012 | C03.RECALCULAR | WHEN-BUTTON-PRESSED | P88] -> unidad FR_RECALCULAR
+  -- 11. [FIN00012 | C03.RECALCULAR | WHEN-BUTTON-PRESSED] -> unidad FR_RECALCULAR
   -- ================================================================================================
   PROCEDURE F12_FR_RECALCULAR IS
     nTasaCambio      NUMBER;
@@ -1683,6 +1717,14 @@ DECLARE
   SET TipoRed = gCF12.TipoRed 
   WHERE NumFinanc = gCF12.NumFinanc;
 
+    -- POST (FR_RECALCULAR): graba en la tabla los cambios digitados en B03_1 (cuotas del paso 10b)
+    IF gCF12.CantGiros != gC01.nCantGirosAux THEN
+      UPDATE ACSELX.COND_FINANCIAMIENTO
+      SET    CantGiros = gCF12.CantGiros
+      WHERE  NumFinanc = gCF12.NumFinanc;
+      P_LOG('POST: COND_FINANCIAMIENTO.CantGiros = '||gCF12.CantGiros||' (NumFinanc '||gCF12.NumFinanc||')');
+    END IF;
+
     -- 'C' si se cambio algun dato de B03_1 respecto a C01; 'R' si no
     IF gCF12.TipoFin != gC01.cTipoFinAux OR gCF12.IndIntInicial != gC01.cIndIntInicialAux OR
        gCF12.Frecuencia != gC01.nFrecuenciaAux OR gCF12.PorcInicial != gC01.nPorcInicialAux OR
@@ -1696,10 +1738,18 @@ DECLARE
     P_LOG('cIndCalculo = '||cIndCalculo);
 
     IF cIndCalculo = 'R' THEN                               -- recorre B03_2 buscando una cuota no prefijada
-      FOR g IN (SELECT IndCambio FROM ACSELX.GIROS_FINANCIAMIENTO_T WHERE NumFinanc = gCF12.NumFinanc) LOOP
-        IF g.IndCambio = kNo THEN cIndOk := kSi; EXIT; END IF;
+      FOR g IN (SELECT IndCambio 
+                FROM ACSELX.GIROS_FINANCIAMIENTO_T 
+                WHERE NumFinanc = gCF12.NumFinanc) LOOP
+        IF g.IndCambio = kNo THEN 
+           cIndOk := kSi; 
+           EXIT; 
+        END IF;
       END LOOP;
-      IF cIndOk = kNo THEN P_ERROR('No puede Prefijar todas las Cuotas. Al menos una debe ser Calculada.'); END IF;
+      
+      IF cIndOk = kNo THEN 
+         P_ERROR('No puede Prefijar todas las Cuotas. Al menos una debe ser Calculada.'); 
+      END IF;
     END IF;
 
     F12_FR_VERIFICAR_POLITICAS_VIO(cIndCalculo);
@@ -1765,14 +1815,6 @@ DECLARE
     WHERE  NumFinanc = gCF12.NumFinanc;
     
   F12_CONSULTAR_B03_1;  -- FR_Refrescar_Bloque('B03_1')
-    
-  FOR g IN (SELECT NumGiro, FecVct, MtoGiroForaneo 
-            FROM ACSELX.GIROS_FINANCIAMIENTO
-              WHERE NumFinanc = gCF12.NumFinanc 
-        ORDER BY NumGiro) LOOP
-      P_LOG('   Cuota '||LPAD(g.NumGiro,3)||'  vence '||TO_CHAR(g.FecVct,'dd/mm/yyyy')||'  monto '||
-            LPAD(TO_CHAR(g.MtoGiroForaneo,'FM999,999,990.00'),14));
-    END LOOP;
   
     FIN_PASO('Total '||gCF12.MtoPago||' '||gCF12.CodMoneda||' en '||gCF12.CantGiros||' cuotas, gastos emision '||gCF12.MtoGastos);
   END F12_FR_RECALCULAR;
@@ -1969,7 +2011,7 @@ DECLARE
     nMontoMaxPrima      NUMBER;
     nNumAutoriza        ACSELX.FINANC_DOC_PAGO_CLIENTE_T.NumAutoriza%TYPE;
   BEGIN
-    INICIO_PASO('13.ACEPTAR','FIN00012 | C03.ACEPTAR | WHEN-BUTTON-PRESSED | P90');
+    INICIO_PASO('13.ACEPTAR','FIN00012 | C03.ACEPTAR | WHEN-BUTTON-PRESSED');
     ACSELX.PR.Asigna_Rollback('FINANCIA');
     
   IF gCF12.TipoFin != gC01.cTipoFinAux OR gCF12.IndIntInicial != gC01.cIndIntInicialAux OR
@@ -2066,19 +2108,21 @@ DECLARE
     ELSE 
       nIndRefinanc := 0; 
     END IF;
+    
     ELSE
       nIndRefinanc := 0;
     END IF;
 
     IF nIndRefinanc = 0 THEN
+
       UPDATE ACSELX.COND_FINANCIAMIENTO 
-    SET IndFactPend = gC00_12.cIndFactPend 
-    WHERE NumRefinanc = gC00_12.nNumRefinanc;
+      SET IndFactPend = gC00_12.cIndFactPend 
+      WHERE NumRefinanc = gC00_12.nNumRefinanc;
       -- RTC-230951: responsable de pago de la poliza (RESP_PAGO)
       P_LOG('PB_ACTUALIZAR_RESP_PAGO');
       ACSELX.PR_COND_FINANCIAMIENTO2.PB_ACTUALIZAR_RESP_PAGO(gC00_12.nNumOper, gC00_12.nNumRefinanc, Vc_Error);
       
-    IF Vc_Error IS NOT NULL THEN
+      IF Vc_Error IS NOT NULL THEN
         P_ERROR('Error al actualizar el responsable de pago. (RESP_PAGO) '||Vc_Error);
       END IF;
 
@@ -2086,26 +2130,26 @@ DECLARE
 
       BEGIN  -- N3019752 (asistencia medica)
         SELECT 1 
-    INTO nExiste
+        INTO nExiste
         FROM   ACSELX.COND_FINANCIAMIENTO A, ACSELX.REC_FINANCIAMIENTO B, ACSELX.RECIBO C
         WHERE  A.NumRefinanc = gC00_12.nNumRefinanc 
-    AND B.NumFinanc = A.NumFinanc 
-    AND C.IdeRec = B.IdeRec
+        AND B.NumFinanc = A.NumFinanc 
+        AND C.IdeRec = B.IdeRec
         AND  C.CodRamoCert IN (SELECT CodLval 
                            FROM ACSELX.LVAL 
-                 WHERE TipoLval = 'RAMOASME');
+                           WHERE TipoLval = 'RAMOASME');
       EXCEPTION
         WHEN NO_DATA_FOUND THEN nExiste := 0;
         WHEN TOO_MANY_ROWS THEN nExiste := 1;
         WHEN OTHERS        THEN nExiste := 0;
       END;
       
-    nExiSal := NULL; -- N3037254 (Rimac Salud)
+      nExiSal := NULL; -- N3037254 (Rimac Salud)
       
-    BEGIN
+      BEGIN
         SELECT NVL(MAX(1),0) 
-    INTO nExiSal 
-    FROM DUAL
+        INTO nExiSal 
+        FROM DUAL
         WHERE  EXISTS (SELECT 1 
                    FROM ACSELX.TRANSACRE T 
              WHERE AplicOrig = 'RS' 
@@ -2116,36 +2160,41 @@ DECLARE
       END;
       
     -- RTC-219899: re-enlace de NumRefracc via COND_FINANCIAMIENTO_AUX
-      SELECT COUNT(1) 
+    SELECT COUNT(1) 
     INTO nFinancOK 
     FROM ACSELX.COND_FINANCIAMIENTO C 
     WHERE C.NumRefracc = gC00_12.nNumRefinanc;
       
     IF NVL(nFinancOK,0) = 0 THEN
+        
         SELECT C.NumFinanc 
-    INTO nNumFinanc 
-    FROM ACSELX.COND_FINANCIAMIENTO C 
-    WHERE C.NumRefinanc = gC00_12.nNumRefinanc;
+        INTO nNumFinanc 
+        FROM ACSELX.COND_FINANCIAMIENTO C 
+        WHERE C.NumRefinanc = gC00_12.nNumRefinanc;
     
-        FOR CFIN IN (SELECT DISTINCT C.NumFinanOld FROM ACSELX.COND_FINANCIAMIENTO_AUX C WHERE C.NumFinanc = nNumFinanc) LOOP
-          UPDATE ACSELX.COND_FINANCIAMIENTO C SET NumReFracc = gC00_12.nNumRefinanc WHERE NumFinanc = CFIN.NumFinanOld;
+        FOR CFIN IN (SELECT DISTINCT C.NumFinanOld 
+                     FROM ACSELX.COND_FINANCIAMIENTO_AUX C 
+                     WHERE C.NumFinanc = nNumFinanc) LOOP
+          UPDATE ACSELX.COND_FINANCIAMIENTO C 
+          SET NumReFracc = gC00_12.nNumRefinanc 
+          WHERE NumFinanc = CFIN.NumFinanOld;
         END LOOP;
       END IF;
 
       -- Control adicional del bloque (no existe en la forma): los documentos nuevos deben estar a nombre del asegurado
       SELECT COUNT(1) 
-    INTO nFinancOK 
-    FROM ACSELX.FACTURA
+      INTO nFinancOK 
+      FROM ACSELX.FACTURA
       WHERE  NumOper = gC00_12.nNumOper
       AND  NOT (NVL(TipoId,'#') = NVL(gCliAseg.TipoId,'#') 
-    AND NumId = gCliAseg.NumId 
-    AND NVL(DvId,'#') = NVL(gCliAseg.DvId,'#'));
+      AND NumId = gCliAseg.NumId 
+      AND NVL(DvId,'#') = NVL(gCliAseg.DvId,'#'));
     
       IF nFinancOK > 0 THEN
         P_ERROR('Hay '||nFinancOK||' documento(s) nuevo(s) que no estan a nombre del asegurado '||gCliAseg.CodCli);
       END IF;
       
-    FOR f IN (SELECT NumFact, TipoDoc, StsFact, FecVencFact, MtoFactMoneda, CodMoneda
+      FOR f IN (SELECT NumFact, TipoDoc, StsFact, FecVencFact, MtoFactMoneda, CodMoneda
                 FROM ACSELX.FACTURA 
         WHERE NumOper = gC00_12.nNumOper 
         ORDER BY FecVencFact, NumFact) LOOP
@@ -2167,43 +2216,45 @@ DECLARE
        P_AVISO('Error al enviar la informacion de RIMAC SALUD. '||SQLERRM);
       END;
       
-    BEGIN
-        IF nExiste = 1 THEN
-          ACSELX.PR_Salud.Retorna_Financ(gC00_12.nNumRefinanc);
-          P_LOG('PR_SALUD.RETORNA_FINANC ejecutado');
-        END IF;
+      BEGIN
+          IF nExiste = 1 THEN
+            ACSELX.PR_Salud.Retorna_Financ(gC00_12.nNumRefinanc);
+            P_LOG('PR_SALUD.RETORNA_FINANC ejecutado');
+          END IF;
       EXCEPTION 
-      WHEN OTHERS THEN 
-    P_AVISO('Error al enviar la informacion de ASISTENCIA MEDICA. '||SQLERRM);
+        WHEN OTHERS THEN 
+         P_AVISO('Error al enviar la informacion de ASISTENCIA MEDICA. '||SQLERRM);
       END;
-      
-    COMMIT; -- FR_Commit_Form
-      
-    -- RTC-257384: :B02_1.NUMAUTORIZA (bloque AUTORIZA_DOC_PAGO_CLIENTE = Pago Facil; vacio en este caso)
+        
+      COMMIT; -- FR_Commit_Form
+        
+      -- RTC-257384: :B02_1.NUMAUTORIZA (bloque AUTORIZA_DOC_PAGO_CLIENTE = Pago Facil; vacio en este caso)
       SELECT MAX(NumAutoriza) 
-    INTO nNumAutoriza 
-    FROM ACSELX.FINANC_DOC_PAGO_CLIENTE_T
+      INTO nNumAutoriza 
+      FROM ACSELX.FINANC_DOC_PAGO_CLIENTE_T
       WHERE IdTipo = gC00_12.nNumRefinanc 
-    AND IndTipo = 'R';
+      AND IndTipo = 'R';
+        
+      F12_CONSULTAR_B03_1;
       
-    F12_CONSULTAR_B03_1;
-      
-    BEGIN
+      BEGIN
         ACSELX.PR_COND_FINANCIAMIENTO2.PB_ACTUALIZAR_RS_CPR_CPMP(nNumAutoriza, gCF12.NumFinanc, gB01_1.CodCli, gCF12.TipoFin,
                                                                  gCF12.CantGiros, gB01_1.CodPlanFracc, gB01_1.NumRefinanc,
                                                                  Vc_Error);
         IF Vc_Error IS NOT NULL THEN
           ROLLBACK; 
-      P_AVISO(Vc_Error);
+          P_AVISO(Vc_Error);
         ELSE
           COMMIT; 
-      P_LOG('PB_ACTUALIZAR_RS_CPR_CPMP ejecutado');
+          P_LOG('PB_ACTUALIZAR_RS_CPR_CPMP ejecutado');
         END IF;
+      
       EXCEPTION 
-      WHEN OTHERS THEN 
-       ROLLBACK; 
-       P_AVISO('PB_ACTUALIZAR_RS_CPR_CPMP: '||SQLERRM);
+       WHEN OTHERS THEN
+        ROLLBACK; 
+        P_AVISO('PB_ACTUALIZAR_RS_CPR_CPMP: '||SQLERRM);
       END;
+      
       -- FR_Notes.Generar_Documento(:C00.nNumRefinanc): tramite en Lotus Notes del cliente Forms (no se replica)
       FIN_PASO('Re-Financiamiento definitivo generado con exito!!!');
     ELSE
@@ -2212,6 +2263,7 @@ DECLARE
       P_ERROR('El refinanciamiento viola '||nCantPolVio||' politica(s) y requiere autorizacion (bloque B05_1): '||
               REPLACE(SUBSTR(cDescPolVio,1,1500),CHR(10),' / '));
     END IF;
+  
   END F12_ACEPTAR;
 
 -- ===================================================================================================
@@ -2227,20 +2279,20 @@ BEGIN
 
   VALIDAR_PARAMETROS;                 -- 00
   -- FIN00010
-  F10_INICIO_FORMA;                   -- 01 WHEN-NEW-FORM-INSTANCE P6
-  F10_BT_DOC;                         -- 02 B01_Q.BT_DOC P25
-  F10_FR_VALIDAR_NUMERO_FACTURA;      -- 03 B02_1.NUMFACT P35 + grabar TEMP_DOCS_FINANC
-  F10_BT_ACEPTAR_DOCUMENTOS;          -- 04 B02_2.BT_ACEPTAR P39 (FR_Iniciar_Operacion_Refinanc)
-  F10_SELECCIONAR_CERTIFICADO;        -- 05 B03_1.CSELECCION P60
-  F10_SIGUIENTE_BLOQUE;               -- 06 B03_1 KEY-NXTBLK P51 (-> FIN00012)
+  F10_INICIO_FORMA;                   -- 01 WHEN-NEW-FORM-INSTANCE
+  F10_BT_DOC;                         -- 02 B01_Q.BT_DOC
+  F10_FR_VALIDAR_NUMERO_FACTURA;      -- 03 B02_1.NUMFACT + grabar TEMP_DOCS_FINANC
+  F10_BT_ACEPTAR_DOCUMENTOS;          -- 04 B02_2.BT_ACEPTAR(FR_Iniciar_Operacion_Refinanc)
+  F10_SELECCIONAR_CERTIFICADO;        -- 05 B03_1.CSELECCION
+  F10_SIGUIENTE_BLOQUE;               -- 06 B03_1 KEY-NXTBLK (-> FIN00012)
   -- FIN00012
-  F12_INICIO_FORMA;                   -- 07 WHEN-NEW-FORM-INSTANCE P6
-  F12_CAMBIAR_RESPONSABLE;            -- 08 B01_1.CODCLI WHEN-VALIDATE-ITEM P27
-  F12_CAMBIAR_PLAN;                   -- 09 B01_1.CODPLANFRACC P36/P33/P35
-  F12_SIGUIENTE_BLOQUE;               -- 10 B01_1 KEY-NXTBLK P21 (FR_Fraccionar)
-  F12_FR_RECALCULAR;                  -- 11 C03.RECALCULAR P88
-  F12_MOTIVO;                         -- 12 C03.MOTIVO P91 / B04_1
-  F12_ACEPTAR;                        -- 13 C03.ACEPTAR P90 (FR_Finalizar_Refra + COMMIT)
+  F12_INICIO_FORMA;                   -- 07 WHEN-NEW-FORM-INSTANCE
+  F12_CAMBIAR_RESPONSABLE;            -- 08 B01_1.CODCLI WHEN-VALIDATE-ITEM
+  F12_CAMBIAR_PLAN;                   -- 09 B01_1.CODPLANFRACC
+  F12_SIGUIENTE_BLOQUE;               -- 10 B01_1 KEY-NXTBLK (FR_Fraccionar)
+  F12_FR_RECALCULAR;                  -- 11 C03.RECALCULAR
+  F12_MOTIVO;                         -- 12 C03.MOTIVO / B04_1
+  F12_ACEPTAR;                        -- 13 C03.ACEPTAR (FR_Finalizar_Refra + COMMIT)
 
   gPaso := 'FIN';
   DBMS_OUTPUT.PUT_LINE(RPAD('=',120,'='));
